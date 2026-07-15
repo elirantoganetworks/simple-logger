@@ -103,8 +103,9 @@ std::size_t build_line(const FormatSpec& fs, const Record& rec, bool colored, ch
 // ---- sinks (sink.cpp) ------------------------------------------------
 
 // Write all n bytes to fd, retrying on EINTR and short writes. Returns false on
-// a real error (the caller then counts a drop).
-bool write_all(int fd, const char* buf, std::size_t n);
+// a real error, with err_out set to the captured errno (0 on success). The
+// caller then records the failure and counts a drop.
+bool write_all(int fd, const char* buf, std::size_t n, int& err_out);
 
 // Append one line to the in-memory capture buffer used by tests.
 void mem_capture_add(const char* line, std::size_t n);
@@ -118,6 +119,40 @@ void mem_capture_reset();
 // Print a one-line diagnostic to stderr, prefixed with "slog: ". Used for init
 // and config problems. Logging itself never throws, so problems surface here.
 void note(const std::string& msg);
+
+// ---- errors (error.cpp) ----------------------------------------------
+
+// True when the build has C++ exceptions on. Guards the one throw (in init())
+// and the try/catch that keeps the log path noexcept.
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS)
+#define SLOG_HAS_EXCEPTIONS 1
+#else
+#define SLOG_HAS_EXCEPTIONS 0
+#endif
+
+// The static message for a code, e.g. "could not open a log file". Never null.
+const char* message_for(errc code);
+
+// Set the sticky last error and note it once to stderr. No user code runs, so it
+// is safe to call with the logger mutex held. err is errno or 0; what is the
+// path, key, or module involved, or "" / nullptr.
+void record(errc code, int err, const char* what);
+
+// record() plus the user handler call (guarded against recursion and, in an
+// exceptions build, against a throw). Call it only where the logger mutex is not
+// held, so a handler that logs cannot deadlock on that mutex.
+void report(errc code, int err, const char* what);
+
+// Count one dropped line. Kept next to report() so both the counter and the
+// public dropped() query live in one place.
+void count_drop();
+
+// The dropped-line count, for dropped() and the test hook.
+std::uint64_t drop_count();
+
+// Clear the sticky error, the drop count, and the one-time stderr flags, so a
+// test starts clean. Called by testing::reset(). Not part of the public API.
+void reset_errors();
 
 // ---- config (config.cpp) ---------------------------------------------
 
@@ -186,6 +221,8 @@ struct RunDir {
     std::string dir_path;
     bool        ok = false;
     std::string err;
+    errc        code      = errc::ok;  // the failure code when ok is false
+    int         sys_errno = 0;         // errno captured at the failure
 };
 
 // Rotate latest and open this run's directory. Serialized across processes by a

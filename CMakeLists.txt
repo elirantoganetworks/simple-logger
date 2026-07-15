@@ -24,7 +24,8 @@ add_library(slog
   src/level.cpp
   src/format.cpp
   src/sink.cpp
-  src/run_dir.cpp)
+  src/run_dir.cpp
+  src/error.cpp)
 add_library(slog::slog ALIAS slog)
 
 target_include_directories(slog

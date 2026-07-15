@@ -83,10 +83,9 @@ long              cached_tid() {
 // resolves its module, so a disabled logger collects nothing.
 std::atomic<int> g_disabled{0};
 
-// Counts flush syncs and dropped lines, for the test hooks. Off the hot path:
-// a flush already does an fdatasync syscall, and a drop is a rare error.
+// Counts flush syncs, for the test hook. Off the hot path: a flush already does
+// an fdatasync syscall. The drop counter lives in error.cpp next to report().
 std::atomic<std::uint64_t> g_flush_count{0};
-std::atomic<std::uint64_t> g_drop_count{0};
 
 // ---- crash handler fd table ------------------------------------------
 // The signal handler may only touch async-signal-safe state, so open file fds
@@ -177,6 +176,37 @@ std::string format_timestamp(std::int64_t epoch_ns) {
     return buf;
 }
 
+// Stop a closed stdout from killing the process. `./app | head -1` is normal
+// use: after head exits, the next stdout write would raise SIGPIPE, which by
+// default ends the process. We turn SIGPIPE into an EPIPE that the write path
+// records, but only if the program has not set its own handler, so a user who
+// handles SIGPIPE keeps their choice. Done once, at first use.
+void ignore_sigpipe_if_default() {
+    struct sigaction old {};
+    if (::sigaction(SIGPIPE, nullptr, &old) == 0 && old.sa_handler == SIG_DFL) {
+        struct sigaction sa {};
+        sa.sa_handler = SIG_IGN;
+        sigemptyset(&sa.sa_mask);
+        ::sigaction(SIGPIPE, &sa, nullptr);
+    }
+}
+
+// A failure carried out of the file-open path (which runs under the logger
+// mutex) so the caller can report it once the mutex is released. That split is
+// what stops a handler that logs from deadlocking on the mutex.
+struct OpenErr {
+    errc code       = errc::ok;
+    int  err        = 0;
+    char detail[128] = {};
+    void set(errc c, int e, const std::string& d) {
+        code = c;
+        err  = e;
+        std::size_t n = 0;
+        for (; n + 1 < sizeof(detail) && n < d.size(); ++n) detail[n] = d[n];
+        detail[n] = '\0';
+    }
+};
+
 // ---- the logger -------------------------------------------------------
 struct Logger {
     std::mutex mu_;
@@ -218,6 +248,7 @@ struct Logger {
     bool             closed_ = false;
 
     Logger() {
+        ignore_sigpipe_if_default();
         start_epoch_ns_ = wall_now();
         file_kv_        = detail::read_config_file(detail::find_config_path());
         env_kv_         = detail::read_env();
@@ -331,12 +362,16 @@ struct Logger {
         reload_locked();
     }
 
-    // Open the run directory once. Returns true if file output is usable.
-    bool ensure_run_open() {
+    // Open the run directory once. Returns true if the run directory opened (so
+    // per-module files can be created). On any failure it fills oe, which the
+    // caller reports once the mutex is released. A hard directory failure returns
+    // false; a single shared file that fails to open still returns true (the
+    // directory is fine) with oe set to file_open.
+    bool ensure_run_open(OpenErr& oe) {
         if (init_state_ == 1)
             return true;
         if (init_state_ == 2)
-            return false;
+            return false;  // already failed hard; leave oe ok so we do not re-report
         std::string dir = settings_.log_dir.empty() ? "logs" : settings_.log_dir;
         // The default <project-dir>/logs is <cwd>/logs; "logs" is relative to cwd.
         timestamp_ = format_timestamp(wall_now());
@@ -349,7 +384,7 @@ struct Logger {
             detail::open_run(dir, sanitize_tag(settings_.run_tag), settings_.retain_runs,
                              settings_.retain_days, cached_pid(), timestamp_, first_file);
         if (!rd.ok) {
-            detail::note(rd.err + "; file output is off for this run");
+            oe.set(rd.code, rd.sys_errno, dir);
             init_state_ = 2;
             return false;
         }
@@ -362,6 +397,7 @@ struct Logger {
                 register_crash_fd(shared_fd_);
             } else {
                 shared_fd_ = -2;
+                oe.set(errc::file_open, rd.sys_errno, first_file);
             }
         }
         init_state_ = 1;
@@ -392,8 +428,9 @@ struct Logger {
         return name;
     }
 
-    // Return this module's file fd, opening it if needed. -2 means "gave up".
-    int ensure_file_open(ModuleState& ms) {
+    // Return this module's file fd, opening it if needed. -2 means "gave up". Any
+    // open failure is put in oe, for the caller to report outside the mutex.
+    int ensure_file_open(ModuleState& ms, OpenErr& oe) {
         int fd = ms.file_fd.load(std::memory_order_acquire);
         if (fd != -1)
             return fd;  // already opened or already failed
@@ -401,7 +438,7 @@ struct Logger {
         fd = ms.file_fd.load(std::memory_order_relaxed);
         if (fd != -1)
             return fd;  // another thread won the race
-        if (!ensure_run_open()) {
+        if (!ensure_run_open(oe)) {
             ms.file_fd.store(-2, std::memory_order_release);
             return -2;
         }
@@ -411,13 +448,14 @@ struct Logger {
             fd = shared_fd_;
         } else {
             fd = detail::open_log_file(run_dir_fd_, make_filename(ms.display));
-            if (fd >= 0) {
+            if (fd < 0) {
+                oe.set(errc::file_open, errno, ms.display);
+            } else {
                 open_fds_.push_back(fd);
                 register_crash_fd(fd);
             }
         }
         if (fd < 0) {
-            detail::note("cannot open log file for module '" + ms.display + "'");
             ms.file_fd.store(-2, std::memory_order_release);
             return -2;
         }
@@ -450,11 +488,19 @@ struct Logger {
             if (detail::mem_capture_active()) {
                 detail::mem_capture_add(line, n);
             } else {
-                const int fd = ensure_file_open(ms);
+                OpenErr   oe;
+                const int fd = ensure_file_open(ms, oe);
+                // Report the open failure here, with the mutex released, so a
+                // handler that logs cannot deadlock. oe is set only on the first
+                // failure, so this fires once per module.
+                if (oe.code != errc::ok)
+                    detail::report(oe.code, oe.err, oe.detail);
                 if (fd >= 0) {
-                    if (!detail::write_all(fd, line, n))
-                        count_drop();
-                    else if (level.value <= flush_level_.load(std::memory_order_relaxed)) {
+                    int werr = 0;
+                    if (!detail::write_all(fd, line, n, werr)) {
+                        detail::report(errc::file_write, werr, ms.display.c_str());
+                        detail::count_drop();
+                    } else if (level.value <= flush_level_.load(std::memory_order_relaxed)) {
                         ::fdatasync(fd);
                         g_flush_count.fetch_add(1, std::memory_order_relaxed);
                     }
@@ -469,17 +515,12 @@ struct Logger {
         if (slvl != kOff && pass) {
             const bool        color = stdout_color_.load(std::memory_order_relaxed);
             const std::size_t n = detail::build_line(*fs, rec, color, line, sizeof(line));
-            if (!detail::write_all(STDOUT_FILENO, line, n))
-                count_drop();
+            int               werr = 0;
+            if (!detail::write_all(STDOUT_FILENO, line, n, werr)) {
+                detail::report(errc::stdout_write, werr, "");
+                detail::count_drop();
+            }
         }
-    }
-
-    std::atomic<std::uint64_t> drops_{0};
-    void                       count_drop() {
-        const std::uint64_t d = drops_.fetch_add(1, std::memory_order_relaxed);
-        g_drop_count.fetch_add(1, std::memory_order_relaxed);
-        if (d == 0)
-            detail::note("a log write failed; further failures are silent");
     }
 
     void do_flush() {
@@ -556,9 +597,8 @@ struct Logger {
         // Drop the spec cache so a test starts from a known count. The specs_
         // objects stay alive so any pointer a reader still holds never dangles.
         spec_cache_.clear();
-        drops_.store(0, std::memory_order_relaxed);
         g_flush_count.store(0, std::memory_order_relaxed);
-        g_drop_count.store(0, std::memory_order_relaxed);
+        detail::reset_errors();
         start_epoch_ns_ = start_epoch;
         reload_locked();
     }
@@ -606,15 +646,29 @@ std::string level_kv(const Level& level) {
 }  // namespace
 
 // ---- hot path ---------------------------------------------------------
-bool should_log(CallSite& cs, const Level& level) {
-    if (g_disabled.load(std::memory_order_relaxed) != 0)
+// The success path here allocates nothing and takes no lock: a global load, then
+// (once the module is resolved) one atomic load and a compare. The only work that
+// can fail is resolving a module the first time, which allocates. That is caught,
+// recorded, and the call returns false, so a log call never throws.
+bool should_log(CallSite& cs, const Level& level) noexcept {
+#if SLOG_HAS_EXCEPTIONS
+    try {
+#endif
+        if (g_disabled.load(std::memory_order_relaxed) != 0)
+            return false;
+        ModuleState* ms =
+            static_cast<ModuleState*>(cs.state.load(std::memory_order_acquire));
+        if (ms == nullptr) {
+            ms = Logger::instance().resolve_module(cs.module);
+            cs.state.store(ms, std::memory_order_release);
+        }
+        return level.value <= ms->collect_level.load(std::memory_order_relaxed);
+#if SLOG_HAS_EXCEPTIONS
+    } catch (...) {
+        detail::report(errc::out_of_memory, 0, cs.module);
         return false;
-    ModuleState* ms = static_cast<ModuleState*>(cs.state.load(std::memory_order_acquire));
-    if (ms == nullptr) {
-        ms = Logger::instance().resolve_module(cs.module);
-        cs.state.store(ms, std::memory_order_release);
     }
-    return level.value <= ms->collect_level.load(std::memory_order_relaxed);
+#endif
 }
 
 namespace {
@@ -626,6 +680,9 @@ void format_and_dispatch(ModuleState& ms, const Level& level, SourceLoc loc,
     __attribute__((format(printf, 4, 0)));
 void format_and_dispatch(ModuleState& ms, const Level& level, SourceLoc loc,
                          const char* fmt, va_list ap) {
+    // A null format from the caller would make vsnprintf undefined, so guard it.
+    if (fmt == nullptr)
+        fmt = "(null)";
     thread_local char msgbuf[detail::kMaxMsg];
     const int         mn      = std::vsnprintf(msgbuf, sizeof(msgbuf), fmt, ap);
     std::size_t       msg_len = 0;
@@ -633,10 +690,12 @@ void format_and_dispatch(ModuleState& ms, const Level& level, SourceLoc loc,
         msg_len = static_cast<std::size_t>(mn);
         if (msg_len > sizeof(msgbuf) - 1) {
             // The message did not fit. Mark the cut with a trailing "..." so a
-            // reader can see the line was truncated, not just short.
+            // reader can see the line was truncated, and record it so a caller
+            // can see it with last_error(). The line is still written.
             msg_len = sizeof(msgbuf) - 1;
             if (msg_len >= 3)
                 msgbuf[msg_len - 3] = msgbuf[msg_len - 2] = msgbuf[msg_len - 1] = '.';
+            detail::record(errc::message_truncated, 0, ms.display.c_str());
         }
     }
     // Keep one record on one line: turn any newline or carriage return in the
@@ -649,39 +708,67 @@ void format_and_dispatch(ModuleState& ms, const Level& level, SourceLoc loc,
 }
 }  // namespace
 
-void emit(CallSite& cs, const Level& level, SourceLoc loc, const char* fmt, ...) {
-    ModuleState* ms = static_cast<ModuleState*>(cs.state.load(std::memory_order_acquire));
-    if (ms == nullptr) {
-        ms = Logger::instance().resolve_module(cs.module);
-        cs.state.store(ms, std::memory_order_release);
-    }
+void emit(CallSite& cs, const Level& level, SourceLoc loc, const char* fmt, ...) noexcept {
     va_list ap;
     va_start(ap, fmt);
-    format_and_dispatch(*ms, level, loc, fmt, ap);
+#if SLOG_HAS_EXCEPTIONS
+    try {
+#endif
+        ModuleState* ms =
+            static_cast<ModuleState*>(cs.state.load(std::memory_order_acquire));
+        if (ms == nullptr) {
+            ms = Logger::instance().resolve_module(cs.module);
+            cs.state.store(ms, std::memory_order_release);
+        }
+        format_and_dispatch(*ms, level, loc, fmt, ap);
+#if SLOG_HAS_EXCEPTIONS
+    } catch (...) {
+        detail::report(errc::out_of_memory, 0, cs.module);
+        detail::count_drop();
+    }
+#endif
     va_end(ap);
 }
 
 void emit_to(const char* module, const Level& level, SourceLoc loc, const char* fmt,
-             ...) {
-    ModuleState* ms = Logger::instance().resolve_module(module);
-    va_list      ap;
+             ...) noexcept {
+    va_list ap;
     va_start(ap, fmt);
-    format_and_dispatch(*ms, level, loc, fmt, ap);
+#if SLOG_HAS_EXCEPTIONS
+    try {
+#endif
+        ModuleState* ms = Logger::instance().resolve_module(module);
+        format_and_dispatch(*ms, level, loc, fmt, ap);
+#if SLOG_HAS_EXCEPTIONS
+    } catch (...) {
+        detail::report(errc::out_of_memory, 0, module);
+        detail::count_drop();
+    }
+#endif
     va_end(ap);
 }
 
-bool is_enabled(const char* module, const Level& level) {
-    if (g_disabled.load(std::memory_order_relaxed) != 0)
+bool is_enabled(const char* module, const Level& level) noexcept {
+#if SLOG_HAS_EXCEPTIONS
+    try {
+#endif
+        if (g_disabled.load(std::memory_order_relaxed) != 0)
+            return false;
+        ModuleState* ms = Logger::instance().resolve_module(module);
+        return level.value <= ms->collect_level.load(std::memory_order_relaxed);
+#if SLOG_HAS_EXCEPTIONS
+    } catch (...) {
+        detail::report(errc::out_of_memory, 0, module);
         return false;
-    ModuleState* ms = Logger::instance().resolve_module(module);
-    return level.value <= ms->collect_level.load(std::memory_order_relaxed);
+    }
+#endif
 }
 
-std::int64_t mono_nanos() {
+std::int64_t mono_nanos() noexcept {
     return g_mono.load(std::memory_order_relaxed)();
 }
 
-const char* version() {
+const char* version() noexcept {
     return SLOG_VERSION_STRING;
 }
 
@@ -793,22 +880,39 @@ void load_env() {
 }
 
 void init() {
-    Logger&                     lg = Logger::instance();
-    std::lock_guard<std::mutex> lock(lg.mu_);
-    lg.ensure_run_open();
+    Logger& lg = Logger::instance();
+    OpenErr oe;
+    bool    ok;
+    {
+        std::lock_guard<std::mutex> lock(lg.mu_);
+        ok = lg.ensure_run_open(oe);
+    }
+    // Report with the mutex released, so a handler is free. A hard directory
+    // failure then throws, because init() runs on the user's stack. A single file
+    // that could not open is not fatal (ok stays true), so it is reported only.
+    if (oe.code != errc::ok)
+        detail::report(oe.code, oe.err, oe.detail);
+    if (!ok) {
+#if SLOG_HAS_EXCEPTIONS
+        // Pass the context (the path or thing that failed) as the what_arg.
+        // std::system_error appends the code's message, so what() reads
+        // "<detail>: <message>" with no doubling.
+        throw error(oe.code, oe.detail);
+#endif
+    }
 }
 
-void flush() {
+void flush() noexcept {
     Logger::instance().do_flush();
 }
-void shutdown() {
+void shutdown() noexcept {
     Logger::instance().do_shutdown();
 }
-void restart_after_fork() {
+void restart_after_fork() noexcept {
     Logger::instance().do_restart_after_fork();
 }
 
-void install_crash_handler() {
+void install_crash_handler() noexcept {
     static std::atomic<bool> installed{false};
     bool                     expected = false;
     if (!installed.compare_exchange_strong(expected, true))
@@ -876,7 +980,7 @@ std::uint64_t flush_count() {
 }
 
 std::uint64_t drop_count() {
-    return g_drop_count.load(std::memory_order_relaxed);
+    return detail::drop_count();
 }
 
 }  // namespace testing

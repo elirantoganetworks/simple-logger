@@ -7,6 +7,7 @@
 // (file, then env, then API), so a later layer wins by simple overwrite.
 
 #include <cctype>
+#include <cerrno>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -66,7 +67,7 @@ std::vector<std::string> split(const std::string& s, char sep) {
 }
 
 // Turn an "off | on | <level>" output value into enabled + level.
-void apply_output(const std::string& v, bool& enabled, int& level) {
+void apply_output(const std::string& key, const std::string& v, bool& enabled, int& level) {
     const std::string t = trim(v);
     if (t == "off") {
         enabled = false;
@@ -81,29 +82,33 @@ void apply_output(const std::string& v, bool& enabled, int& level) {
     if (parse_level(t, parsed))
         level = parsed;
     else
-        note("bad level '" + t + "', keeping the current one");
+        record(errc::config_bad_value, 0, (key + "=" + t).c_str());
 }
 
-// Parse a boolean value, noting a bad one instead of silently keeping the old.
+// Parse a boolean value, recording a bad one instead of silently keeping the old.
 void apply_bool(const std::string& key, const std::string& val, bool& out) {
     if (!parse_bool(val, out))
-        note("bad boolean for '" + key + "': " + val);
+        record(errc::config_bad_value, 0, (key + "=" + trim(val)).c_str());
 }
 
 }  // namespace
 
 Kv read_config_file(const std::string& path) {
-    Kv            kv;
+    Kv kv;
+    if (path.empty())
+        return kv;  // no config file was requested, so this is not an error
     std::ifstream in(path);
-    if (!in)
+    if (!in) {
+        record(errc::config_file_read, errno, path.c_str());
         return kv;
+    }
     std::string line;
     while (std::getline(in, line)) {
         const std::string body = strip_comment(line);
         const std::size_t eq   = body.find('=');
         if (eq == std::string::npos) {
             if (!trim(body).empty())
-                note("ignoring config line without '=': " + trim(line));
+                record(errc::config_bad_value, 0, "config line without '='");
             continue;
         }
         const std::string key = trim(body.substr(0, eq));
@@ -189,7 +194,7 @@ void apply_kv(Settings& s, const Kv& kv) {
             const std::string module = key.substr(7);
             int               level  = 0;
             if (!parse_level(val, level))
-                note("bad level for module '" + module + "': " + val);
+                record(errc::config_bad_value, 0, (key + "=" + val).c_str());
             else if (level == kInherit)
                 s.module_level.erase(module);  // "inherit" means no override
             else
@@ -204,19 +209,19 @@ void apply_kv(Settings& s, const Kv& kv) {
             if (parse_level(val, level) && level != kInherit)
                 s.global_level = level;
             else
-                note("bad global verbosity: " + val);
+                record(errc::config_bad_value, 0, ("verbosity=" + val).c_str());
         } else if (key == "dir") {
             s.log_dir = val;
         } else if (key == "tag") {
             s.run_tag = val;
         } else if (key == "file") {
-            apply_output(val, s.file_enabled, s.file_level);
+            apply_output(key, val, s.file_enabled, s.file_level);
         } else if (key == "file.per_module") {
             apply_bool(key, val, s.file_per_module);
         } else if (key == "file.name") {
             s.file_name = val;
         } else if (key == "stdout") {
-            apply_output(val, s.stdout_enabled, s.stdout_level);
+            apply_output(key, val, s.stdout_enabled, s.stdout_level);
         } else if (key == "stdout.only") {
             apply_bool(key, val, s.stdout_only);
         } else if (key == "stdout.modules") {
@@ -234,13 +239,13 @@ void apply_kv(Settings& s, const Kv& kv) {
             if (parse_level(val, level) && level != kInherit)
                 s.flush_level = level;
             else
-                note("bad flush level: " + val);
+                record(errc::config_bad_value, 0, ("flush=" + val).c_str());
         } else if (key == "retain.runs") {
             s.retain_runs = std::atoi(val.c_str());
         } else if (key == "retain.days") {
             s.retain_days = std::atoi(val.c_str());
         } else {
-            note("unknown config key: " + key);
+            record(errc::config_unknown_key, 0, key.c_str());
         }
     }
 }

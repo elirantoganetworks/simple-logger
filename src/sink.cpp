@@ -20,13 +20,15 @@
 namespace slog {
 namespace detail {
 
-bool write_all(int fd, const char* buf, std::size_t n) {
+bool write_all(int fd, const char* buf, std::size_t n, int& err_out) {
+    err_out          = 0;
     std::size_t done = 0;
     while (done < n) {
         const ssize_t w = ::write(fd, buf + done, n - done);
         if (w < 0) {
             if (errno == EINTR)
                 continue;  // signal, just retry
+            err_out = errno;
             return false;
         }
         done += static_cast<std::size_t>(w);

@@ -122,7 +122,10 @@ TEST_CASE("a bad boolean value keeps the default and prints a note") {
         err = cap.text();
     }
     CHECK(is_enabled("", ERROR));  // logging still on
-    CHECK(err.find("bad boolean") != std::string::npos);
+    CHECK(err.find("slog:") != std::string::npos);       // a note reached stderr
+    CHECK(err.find("ture") != std::string::npos);         // it names the bad value
+    CHECK(static_cast<int>(last_error().code) ==
+          static_cast<int>(errc::config_bad_value));      // and set the sticky code
 }
 
 TEST_CASE("an unknown key is ignored with a note") {
