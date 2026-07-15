@@ -83,6 +83,11 @@ long              cached_tid() {
 // resolves its module, so a disabled logger collects nothing.
 std::atomic<int> g_disabled{0};
 
+// Counts flush syncs and dropped lines, for the test hooks. Off the hot path:
+// a flush already does an fdatasync syscall, and a drop is a rare error.
+std::atomic<std::uint64_t> g_flush_count{0};
+std::atomic<std::uint64_t> g_drop_count{0};
+
 // ---- crash handler fd table ------------------------------------------
 // The signal handler may only touch async-signal-safe state, so open file fds
 // are mirrored into this fixed table. The handler writes a note and syncs them.
@@ -148,6 +153,20 @@ std::string sanitize(const std::string& s) {
     return out;
 }
 
+// Make a run tag safe to use as one path and file-name part. sanitize() turns a
+// slash (and any other odd byte) into '_', so the tag can never add a path
+// level. A tag of only dots ("." or "..") would still name the current or parent
+// directory, so those become underscores. Without this a tag could send a run
+// outside the log dir or silently break file output.
+std::string sanitize_tag(const std::string& tag) {
+    if (tag.empty())
+        return tag;
+    std::string t = sanitize(tag);
+    if (t.find_first_not_of('.') == std::string::npos)
+        t = std::string(t.size(), '_');
+    return t;
+}
+
 std::string format_timestamp(std::int64_t epoch_ns) {
     const std::time_t secs = epoch_ns / 1000000000;
     std::tm           tmv;
@@ -177,6 +196,12 @@ struct Logger {
     // dangles. Config changes are rare, so this list stays short.
     std::atomic<const detail::FormatSpec*>                 fmt_ptr_{nullptr};
     std::vector<std::unique_ptr<const detail::FormatSpec>> specs_;
+    // A new spec is parsed only when its inputs are new. Without this, every
+    // config change (even one that does not touch the format) would allocate and
+    // keep a spec forever, so a program that changes the level at runtime would
+    // grow without bound. The cache keys on the format inputs, so the retained
+    // set is bounded by the number of distinct formats the program ever uses.
+    std::map<std::string, const detail::FormatSpec*> spec_cache_;
 
     std::atomic<int>  flush_level_{SLOG_LEVEL_WARNING};
     std::atomic<bool> stdout_color_{false};
@@ -223,11 +248,25 @@ struct Logger {
         flush_level_.store(settings_.flush_level, std::memory_order_relaxed);
         stdout_color_.store(resolve_color(), std::memory_order_relaxed);
 
-        std::unique_ptr<const detail::FormatSpec> spec =
-            detail::parse_format(settings_.format, settings_.enable_time,
-                                 settings_.enable_elapsed, start_epoch_ns_);
-        const detail::FormatSpec* raw = spec.get();
-        specs_.push_back(std::move(spec));  // keep it alive for lock-free readers
+        // Reuse a spec for a format we have already parsed. The key holds every
+        // input parse_format depends on. This keeps repeated config changes from
+        // leaking a spec each time (see spec_cache_).
+        const std::string key = settings_.format + '\x01' +
+                                (settings_.enable_time ? '1' : '0') +
+                                (settings_.enable_elapsed ? '1' : '0') + '\x01' +
+                                std::to_string(start_epoch_ns_);
+        const detail::FormatSpec* raw = nullptr;
+        const auto                cached = spec_cache_.find(key);
+        if (cached != spec_cache_.end()) {
+            raw = cached->second;
+        } else {
+            std::unique_ptr<const detail::FormatSpec> spec =
+                detail::parse_format(settings_.format, settings_.enable_time,
+                                     settings_.enable_elapsed, start_epoch_ns_);
+            raw = spec.get();
+            specs_.push_back(std::move(spec));  // keep it alive for lock-free readers
+            spec_cache_[key] = raw;
+        }
         fmt_ptr_.store(raw, std::memory_order_release);
 
         for (auto& kv : modules_) compute_module(*kv.second);
@@ -307,7 +346,7 @@ struct Logger {
         const std::string first_file =
             settings_.file_per_module ? std::string() : make_filename("default");
         detail::RunDir rd =
-            detail::open_run(dir, settings_.run_tag, settings_.retain_runs,
+            detail::open_run(dir, sanitize_tag(settings_.run_tag), settings_.retain_runs,
                              settings_.retain_days, cached_pid(), timestamp_, first_file);
         if (!rd.ok) {
             detail::note(rd.err + "; file output is off for this run");
@@ -349,7 +388,7 @@ struct Logger {
             stem += "-" + sanitize(module_display);
         std::string name = stem + ext;
         if (!settings_.run_tag.empty())
-            name = settings_.run_tag + "-" + name;
+            name = sanitize_tag(settings_.run_tag) + "-" + name;
         return name;
     }
 
@@ -415,8 +454,10 @@ struct Logger {
                 if (fd >= 0) {
                     if (!detail::write_all(fd, line, n))
                         count_drop();
-                    else if (level.value <= flush_level_.load(std::memory_order_relaxed))
+                    else if (level.value <= flush_level_.load(std::memory_order_relaxed)) {
                         ::fdatasync(fd);
+                        g_flush_count.fetch_add(1, std::memory_order_relaxed);
+                    }
                 }
             }
         }
@@ -436,6 +477,7 @@ struct Logger {
     std::atomic<std::uint64_t> drops_{0};
     void                       count_drop() {
         const std::uint64_t d = drops_.fetch_add(1, std::memory_order_relaxed);
+        g_drop_count.fetch_add(1, std::memory_order_relaxed);
         if (d == 0)
             detail::note("a log write failed; further failures are silent");
     }
@@ -511,6 +553,12 @@ struct Logger {
         file_kv_.clear();
         env_kv_.clear();
         api_kv_.clear();
+        // Drop the spec cache so a test starts from a known count. The specs_
+        // objects stay alive so any pointer a reader still holds never dangles.
+        spec_cache_.clear();
+        drops_.store(0, std::memory_order_relaxed);
+        g_flush_count.store(0, std::memory_order_relaxed);
+        g_drop_count.store(0, std::memory_order_relaxed);
         start_epoch_ns_ = start_epoch;
         reload_locked();
     }
@@ -583,8 +631,13 @@ void format_and_dispatch(ModuleState& ms, const Level& level, SourceLoc loc,
     std::size_t       msg_len = 0;
     if (mn > 0) {
         msg_len = static_cast<std::size_t>(mn);
-        if (msg_len > sizeof(msgbuf) - 1)
+        if (msg_len > sizeof(msgbuf) - 1) {
+            // The message did not fit. Mark the cut with a trailing "..." so a
+            // reader can see the line was truncated, not just short.
             msg_len = sizeof(msgbuf) - 1;
+            if (msg_len >= 3)
+                msgbuf[msg_len - 3] = msgbuf[msg_len - 2] = msgbuf[msg_len - 1] = '.';
+        }
     }
     // Keep one record on one line: turn any newline or carriage return in the
     // message into a space. This stops a message (often caller or user data) from
@@ -698,17 +751,17 @@ void configure(const Config& c) {
     api["verbosity"]                = level_kv(c.verbosity);
     for (const auto& kv : c.module_verbosity)
         api["module." + kv.first] = detail::level_name(kv.second);
-    if (!c.log_dir.empty())
-        api["dir"] = c.log_dir;
-    if (!c.run_tag.empty())
-        api["tag"] = c.run_tag;
+    // Write these unconditionally, so an empty field resets to the default and
+    // does not leak a value from an earlier configure() or setter call. This is
+    // what "configure sets every field" means.
+    api["dir"]             = c.log_dir;
+    api["tag"]             = c.run_tag;
     api["file"]            = !c.file_enabled ? "off"
                                              : (c.file_verbosity.value == kInherit
                                                     ? "on"
                                                     : detail::level_name(c.file_verbosity.value));
     api["file.per_module"] = c.file_per_module ? "true" : "false";
-    if (!c.file_name.empty())
-        api["file.name"] = c.file_name;
+    api["file.name"]       = c.file_name;
     api["stdout"]         = !c.out.enabled ? "off"
                                            : (c.out.verbosity.value == kInherit
                                                   ? "on"
@@ -805,6 +858,25 @@ void reset() {
     reset_clock();
     reset_mono_clock();
     Logger::instance().do_reset(wall_now());
+}
+
+std::size_t format_spec_count() {
+    // The number of specs actually retained in memory. The bug was that this
+    // grew on every config change; the fix keeps it at the number of distinct
+    // formats. A test measures the change across same-format calls, which must
+    // be zero. (This count only ever grows over a process, since a retained spec
+    // is never freed while a lock-free reader might hold it.)
+    Logger&                     lg = Logger::instance();
+    std::lock_guard<std::mutex> lock(lg.mu_);
+    return lg.specs_.size();
+}
+
+std::uint64_t flush_count() {
+    return g_flush_count.load(std::memory_order_relaxed);
+}
+
+std::uint64_t drop_count() {
+    return g_drop_count.load(std::memory_order_relaxed);
 }
 
 }  // namespace testing
