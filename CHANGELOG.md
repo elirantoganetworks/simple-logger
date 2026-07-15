@@ -5,6 +5,42 @@ All notable changes to slog are recorded here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 slog follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-07-15
+
+Real error propagation. Every failure now reaches you with a meaningful code.
+Nothing fails in silence, and a log call still never throws and never crashes.
+
+### Added
+
+- An error code for every failure site (`slog::errc`), grouped by area and frozen
+  once released. See the table in the [deep dive](docs/deep-dive.md#error-codes).
+- Three ways to see a runtime failure without a throw: a sticky `last_error()`, an
+  `error_handler` you install with `set_error_handler`, and a `dropped()` count of
+  lines lost to a failed write or allocation. `clear_error()` resets the sticky
+  error. Each channel is allocation-free, so it is safe even when the failure is
+  out of memory.
+- `slog::error`, a single `std::system_error` type that `init()` throws on a hard
+  setup failure, and `error_category()` / `make_error_code()` for interop with
+  `std::error_code`.
+- An `error_handling` example, and a full error section in the deep dive.
+
+### Changed
+
+- `init()` now throws `slog::error` on a hard setup failure (the log directory
+  cannot be created, the run lock cannot be taken, or the run directory cannot be
+  opened), where before it printed a note and carried on. The lazy path (logging
+  without calling `init()`) is unchanged and still never throws. See the migration
+  note in the [deep dive](docs/deep-dive.md#migrating-from-100).
+- Config problems (a bad value, an unknown key, an unreadable file you loaded)
+  now set a code and are readable through `last_error()`, in addition to the
+  stderr note they already printed.
+
+### Fixed
+
+- A closed stdout (as in `app | head`) no longer risks ending the process with
+  `SIGPIPE`; the write is turned into a recorded, counted drop. slog installs the
+  `SIGPIPE` ignore only if the program has not set its own handler.
+
 ## [1.0.0] - 2026-07-15
 
 The first release. slog is a small, fast logging library for Linux C++ programs.
