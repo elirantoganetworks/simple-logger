@@ -36,6 +36,11 @@ target_include_directories(slog
 
 target_compile_features(slog PUBLIC cxx_std_17)
 
+# Hide everything by default. Only the public API is marked SLOG_API (see
+# include/slog/slog.h), so the shared library exports just that, not the internal
+# detail namespace or the standard-library template code.
+target_compile_options(slog PRIVATE -fvisibility=hidden -fvisibility-inlines-hidden)
+
 find_package(Threads REQUIRED)
 target_link_libraries(slog PUBLIC Threads::Threads)
 
@@ -69,6 +74,23 @@ install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(EXPORT slogTargets
   FILE slogTargets.cmake
   NAMESPACE slog::
+  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/slog)
+
+# The package config wrapper, so find_package(slog) works. Without it the export
+# above ships targets that nothing loads. The version file lets a consumer pin a
+# compatible version.
+include(CMakePackageConfigHelpers)
+configure_package_config_file(
+  ${CMAKE_CURRENT_SOURCE_DIR}/cmake/slogConfig.cmake.in
+  ${CMAKE_CURRENT_BINARY_DIR}/slogConfig.cmake
+  INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/slog)
+write_basic_package_version_file(
+  ${CMAKE_CURRENT_BINARY_DIR}/slogConfigVersion.cmake
+  VERSION ${PROJECT_VERSION}
+  COMPATIBILITY SameMajorVersion)
+install(FILES
+  ${CMAKE_CURRENT_BINARY_DIR}/slogConfig.cmake
+  ${CMAKE_CURRENT_BINARY_DIR}/slogConfigVersion.cmake
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/slog)
 
 configure_file(slog.pc.in slog.pc @ONLY)

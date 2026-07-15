@@ -51,6 +51,20 @@
 #define LOG_MODULE ""
 #endif
 
+// ---- export marker ----------------------------------------------------
+// The library is built with hidden visibility, so only the functions marked
+// SLOG_API are exported from the shared library. Everything else (the internal
+// detail namespace and the C++ standard-library template code) stays private.
+#ifndef SLOG_API
+#if defined(_WIN32)
+#define SLOG_API
+#elif defined(__GNUC__)
+#define SLOG_API __attribute__((visibility("default")))
+#else
+#define SLOG_API
+#endif
+#endif
+
 namespace slog {
 
 // A level is a small value type: a name plus a verbosity value. A higher value
@@ -78,7 +92,7 @@ inline constexpr Level INHERIT{-1000000000, "inherit"};
 // more verbose. Example: add_level("TRACE", 50) sits above DEBUG;
 // add_level("NOTICE", 25) sits between WARNING and INFO. The returned Level can
 // be used with the LOG(level, ...) macro and as a threshold in config.
-Level add_level(const char* name, int value);
+SLOG_API Level add_level(const char* name, int value);
 
 // Source location captured at the call site by the log macros.
 struct SourceLoc {
@@ -98,25 +112,25 @@ struct CallSite {
 // Hot-path filter check. Cheap: a global disable load, then (once resolved) one
 // atomic load of the module collect level and one integer compare. Returns
 // true when the record could reach at least one output.
-bool should_log(CallSite& cs, const Level& level);
+SLOG_API bool should_log(CallSite& cs, const Level& level);
 
 // Emit a record. Called by the macros only after should_log returned true. The
 // printf format attribute lets GCC and Clang check the format string.
-void emit(CallSite& cs, const Level& level, SourceLoc loc, const char* fmt, ...)
+SLOG_API void emit(CallSite& cs, const Level& level, SourceLoc loc, const char* fmt, ...)
     __attribute__((format(printf, 4, 5)));
 
 // Emit for a module named at the call site (used by LOG_TO). Resolves the module
 // each call, so the module value may vary.
-void emit_to(const char* module, const Level& level, SourceLoc loc, const char* fmt, ...)
-    __attribute__((format(printf, 4, 5)));
+SLOG_API void emit_to(const char* module, const Level& level, SourceLoc loc, const char* fmt,
+                      ...) __attribute__((format(printf, 4, 5)));
 
 // Cheap guard for building expensive log arguments by hand:
 //   if (slog::is_enabled("net", slog::DEBUG)) { ... }
-bool is_enabled(const char* module, const Level& level);
+SLOG_API bool is_enabled(const char* module, const Level& level);
 
 // Monotonic clock in nanoseconds, used by the rate-limit macros. Declared here
 // so the header does not need to include <chrono>.
-std::int64_t mono_nanos();
+SLOG_API std::int64_t mono_nanos();
 
 // ---- configuration ----------------------------------------------------
 
@@ -163,51 +177,51 @@ struct Config {
 
 // Apply a whole config. Highest precedence. Call it (and the dir, tag and file
 // setters) before the first log call, since files open on first use.
-void configure(const Config& c);
+SLOG_API void configure(const Config& c);
 
 // Single-setting helpers. All are highest precedence, same as configure().
-void set_verbosity(const Level& level);
-void set_module_verbosity(const char* module, const Level& level);
-void set_disabled(bool off);
-void set_log_dir(const char* path);
-void set_run_tag(const char* tag);
+SLOG_API void set_verbosity(const Level& level);
+SLOG_API void set_module_verbosity(const char* module, const Level& level);
+SLOG_API void set_disabled(bool off);
+SLOG_API void set_log_dir(const char* path);
+SLOG_API void set_run_tag(const char* tag);
 
-void set_stdout_verbosity(const Level& level);  // turns stdout on at this level
-void set_stdout_only(bool only);
-void set_stdout_modules(const std::vector<std::string>& modules);
-void stdout_off();
+SLOG_API void set_stdout_verbosity(const Level& level);  // turns stdout on at this level
+SLOG_API void set_stdout_only(bool only);
+SLOG_API void set_stdout_modules(const std::vector<std::string>& modules);
+SLOG_API void stdout_off();
 
-void set_file_verbosity(const Level& level);
-void set_file_per_module(bool per_module);
-void set_file_name(const char* name);
-void file_off();
+SLOG_API void set_file_verbosity(const Level& level);
+SLOG_API void set_file_per_module(bool per_module);
+SLOG_API void set_file_name(const char* name);
+SLOG_API void file_off();
 
-void set_format(const char* pattern);
-void enable_time(bool on);
-void enable_elapsed(bool on);
-void set_flush_level(const Level& level);
+SLOG_API void set_format(const char* pattern);
+SLOG_API void enable_time(bool on);
+SLOG_API void enable_elapsed(bool on);
+SLOG_API void set_flush_level(const Level& level);
 
 // Lifecycle.
-void init();   // open files now (optional; done on first log)
-void flush();  // flush all sinks now; safe to call while other threads log
+SLOG_API void init();   // open files now (optional; done on first log)
+SLOG_API void flush();  // flush all sinks now; safe to call while other threads log
 
 // Flush and close the sinks. Call it only when no other thread is logging (it
 // closes the file descriptors). It is not required: the tail is flushed
 // automatically at exit, and the OS closes the files then.
-void shutdown();
+SLOG_API void shutdown();
 
-void install_crash_handler();  // best-effort flush on a fatal signal
+SLOG_API void install_crash_handler();  // best-effort flush on a fatal signal
 
 // Open fresh, PID-named files for a forked child. Call it from the child before
 // it logs, and only from the child's single (post-fork) thread.
-void restart_after_fork();
+SLOG_API void restart_after_fork();
 
 // Explicit config loads. Normally the first use does file then env for you.
-void load_file(const char* path);
-void load_env();
+SLOG_API void load_file(const char* path);
+SLOG_API void load_env();
 
 // Library version string, e.g. "1.0.0".
-const char* version();
+SLOG_API const char* version();
 
 }  // namespace slog
 

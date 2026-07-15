@@ -1,0 +1,9 @@
+@PACKAGE_INIT@
+
+# slog links pthread through Threads::Threads, so a consumer needs it too.
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+include("${CMAKE_CURRENT_LIST_DIR}/slogTargets.cmake")
+
+check_required_components(slog)

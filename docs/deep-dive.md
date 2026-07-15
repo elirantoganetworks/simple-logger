@@ -350,7 +350,10 @@ one line.
 
 **What is not:** slog does not claim these guarantees on NFS or other network
 mounts. It does not coordinate rotation of a single shared file across processes;
-the per-run directory model is how it keeps runs apart instead.
+the per-run directory model is how it keeps runs apart instead. One more edge: if
+the disk fills in the middle of a write, the last line can be left partial, since
+an append cannot be rolled back. slog counts it as a dropped line and keeps going,
+so at most one line at the very end may be short.
 
 **fork.** After `fork`, the child inherits the parent's open descriptors. All log
 descriptors are `O_CLOEXEC`, so a `fork` then `exec` closes them. A bare `fork`
@@ -368,8 +371,9 @@ program peppered with `DEBUG` calls should cost almost nothing in production.
 
 **A filtered-out call** reads a global "disabled" flag and, once the call site has
 resolved its module the first time, one atomic level value, then compares. That is
-a couple of atomic loads and an integer compare, a few nanoseconds, with no lock,
-no allocation, no syscall, and the message arguments are never evaluated.
+a couple of atomic loads and an integer compare, on the order of ten to twenty
+nanoseconds, with no lock, no allocation, no syscall, and the message arguments
+are never evaluated.
 
 **A live call** formats the message into a thread-local buffer with `vsnprintf`,
 builds the prefix, and issues one `write`.
@@ -405,7 +409,9 @@ slog prints one line to stderr, prefixed `slog:`, and keeps going.
 - **The log dir cannot be created** (no permission, read-only filesystem, a file
   in the way): slog turns file output off for the run and keeps stdout working.
 - **A write fails** (disk full, I/O error): slog drops that line, counts it, and
-  prints a one-time note so the failure is visible without flooding stderr.
+  prints a one-time note so the failure is visible without flooding stderr. If the
+  disk fills mid-write, the last line already on disk can be short, since an
+  append cannot be undone; every earlier line stays whole.
 - **A config value is bad** (an unknown level, a bad boolean, an unknown key):
   slog prints a note, skips that setting, and keeps the default.
 - **A message is longer than the line limit:** slog truncates it with a `...`
