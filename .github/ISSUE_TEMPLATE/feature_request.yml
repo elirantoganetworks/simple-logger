@@ -1,0 +1,61 @@
+name: Feature request
+description: Propose a change, and argue why it is worth the size it adds.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        slog has one hard goal: stay small and stay simple. A feature has to earn
+        its place against that goal. Please argue for it in these terms, not
+        around them.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: The problem you hit, not the feature you want. What were you trying to do.
+    validations:
+      required: true
+
+  - type: textarea
+    id: cannot
+    attributes:
+      label: Why the current API cannot do it
+      description: What you tried with today's config, macros, and setters, and where it fell short.
+    validations:
+      required: true
+
+  - type: textarea
+    id: sketch
+    attributes:
+      label: A rough API sketch
+      description: How the new API might look at the call site. Rough is fine.
+      render: cpp
+    validations:
+      required: true
+
+  - type: textarea
+    id: cost
+    attributes:
+      label: What it costs
+      description: >
+        Be honest about the price: header size, hot-path cost, a new dependency,
+        more config keys, more to maintain. A feature with no cost is rare.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What else you considered
+      description: Other ways to solve the problem, including doing it outside slog, and why they do not fit.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: goal
+    attributes:
+      label: The goal
+      options:
+        - label: I have argued why this is worth the size and complexity it adds.
+          required: true
