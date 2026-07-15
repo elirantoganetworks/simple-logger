@@ -80,3 +80,9 @@ if(SLOG_BUILD_TESTS AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt)
   enable_testing()
   add_subdirectory(tests)
 endif()
+
+# ---- examples (added in phase 4) -------------------------------------
+option(SLOG_BUILD_EXAMPLES "Build slog examples" ${SLOG_TOP_LEVEL})
+if(SLOG_BUILD_EXAMPLES AND EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/examples/CMakeLists.txt)
+  add_subdirectory(examples)
+endif()
