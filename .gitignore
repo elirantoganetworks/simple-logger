@@ -1,0 +1,15 @@
+# Build output
+/build/
+build*/
+cmake-build-*/
+
+# Default log output made when running the library or examples
+/logs/
+
+# Local config a user might drop in
+/simplelog.conf
+
+# Editor and OS cruft
+*.swp
+*~
+.DS_Store
