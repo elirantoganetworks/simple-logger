@@ -126,4 +126,8 @@ TEST_CASE("the crash handler preserves the log up to a fatal signal") {
     REQUIRE(latest.size() == 1);
     auto lines = tu::split_lines(tu::read_file(dir.sub("latest/" + latest[0])));
     CHECK(tu::contains(lines, "before crash"));
+    // The line above is written straight through, so it would survive even with
+    // a broken handler. This assertion proves the handler itself ran: the note
+    // is written only by the crash handler, on the fatal signal.
+    CHECK(tu::contains(lines, "fatal signal"));
 }

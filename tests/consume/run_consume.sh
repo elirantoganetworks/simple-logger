@@ -32,4 +32,32 @@ cmake --install "$WORK/lib" --prefix "$WORK/prefix" >/dev/null
     -L"$WORK/prefix/lib" -lslog -Wl,-rpath,"$WORK/prefix/lib" -pthread
 "$WORK/prebuilt_app"
 
-echo "all three consumption paths built and ran"
+echo "== path 4: find_package(slog) =="
+mkdir -p "$WORK/fp"
+cat > "$WORK/fp/CMakeLists.txt" <<EOF
+cmake_minimum_required(VERSION 3.14)
+project(slog_find_package_consumer CXX)
+find_package(slog REQUIRED)
+add_executable(fp_app "$APP")
+target_link_libraries(fp_app PRIVATE slog::slog)
+EOF
+cmake -S "$WORK/fp" -B "$WORK/fp/build" -DCMAKE_PREFIX_PATH="$WORK/prefix" \
+    -DCMAKE_BUILD_TYPE=Release >/dev/null
+cmake --build "$WORK/fp/build" >/dev/null
+"$WORK/fp/build/fp_app"
+
+echo "== symbol check: the shared library exports no internal symbols =="
+LIB=$(ls "$WORK/prefix"/lib/libslog.so 2>/dev/null | head -1)
+if [ -z "$LIB" ]; then
+    echo "FAIL: shared library not found for the symbol check"
+    exit 1
+fi
+LEAKED=$(nm -D --defined-only -C "$LIB" | grep -c 'slog::detail::' || true)
+if [ "$LEAKED" -ne 0 ]; then
+    echo "FAIL: $LEAKED internal slog::detail:: symbols are exported"
+    nm -D --defined-only -C "$LIB" | grep 'slog::detail::' | head
+    exit 1
+fi
+echo "ok: no internal symbols exported"
+
+echo "all consumption paths built and ran"
