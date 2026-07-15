@@ -31,9 +31,18 @@ slog_add_test(test_lifecycle test_lifecycle.cpp)
 slog_add_test(test_concurrency test_concurrency.cpp)
 slog_add_test(test_perf test_perf.cpp)
 slog_add_test(test_audit_fixes test_audit_fixes.cpp)
+slog_add_test(test_errors test_errors.cpp)
 slog_add_test(test_headers
   test_headers.cpp hdr_slog_alone.cpp hdr_testing_alone.cpp hdr_no_short.cpp
   strip_check.cpp)
+
+# The header and log path must build with exceptions off. Its own executable,
+# compiled with -fno-exceptions, with a plain main (doctest needs exceptions).
+add_executable(test_no_exceptions no_exceptions.cpp)
+target_link_libraries(test_no_exceptions PRIVATE slog::slog)
+target_include_directories(test_no_exceptions PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(test_no_exceptions PRIVATE -Wall -Wextra -fno-exceptions)
+add_test(NAME test_no_exceptions COMMAND test_no_exceptions)
 
 # The multi-process test needs the helper path and must be built after it.
 slog_add_test(test_multiproc test_multiproc.cpp)
