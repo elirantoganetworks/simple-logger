@@ -1,0 +1,124 @@
+name: Bug report
+description: Report a bug in slog with enough to reproduce it.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. slog is Linux only, so there is no need to say
+        which operating system. Please fill in the fields so the bug can be
+        reproduced. For a security problem, do not use this form. See the
+        security policy instead.
+
+  - type: input
+    id: version
+    attributes:
+      label: slog version
+      description: The value from slog::version(), or the tag or commit you built.
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: compiler
+    attributes:
+      label: Compiler and version
+      description: Run the compiler with --version and paste the first line.
+      placeholder: "g++ 13.3.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: standard
+    attributes:
+      label: C++ standard
+      description: The -std the code was built with.
+      options:
+        - "c++17"
+        - "c++20"
+        - "c++23"
+        - "other (say in the reproduction)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: build_type
+    attributes:
+      label: Build type
+      options:
+        - "Debug"
+        - "Release"
+        - "RelWithDebInfo"
+        - "other (say in the reproduction)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: consumption
+    attributes:
+      label: How slog was consumed
+      description: Which of the three supported paths you used.
+      options:
+        - "Copied sources (compiled src/*.cpp with your program)"
+        - "third_party subdirectory (add_subdirectory, link slog::slog)"
+        - "Prebuilt shared library (installed, linked -lslog or find_package)"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: config_source
+    attributes:
+      label: Where the config came from
+      description: Tick every source in force. Later sources win (file, then env, then API).
+      options:
+        - label: "Config file (simplelog.conf, or the file named by SLOG_CONFIG)"
+        - label: "Environment variables (SLOG_* )"
+        - label: "Code API (configure() or the set_* helpers)"
+        - label: "No config, defaults only"
+
+  - type: textarea
+    id: config
+    attributes:
+      label: The config in force
+      description: The keys and values that were set, from every source above.
+      placeholder: |
+        SLOG_VERBOSITY=warning,net=debug
+        file: dir = ./logs
+        code: slog::set_flush_level(slog::ERROR);
+    validations:
+      required: false
+
+  - type: input
+    id: filesystem
+    attributes:
+      label: Filesystem for the log directory
+      description: >
+        Optional. slog only claims whole-line writes on a local filesystem, so
+        this matters for tearing or missing lines.
+      placeholder: "local ext4 / tmpfs / NFS"
+    validations:
+      required: false
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest program, the build command, and the run command.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: The output you saw. Include the stderr lines prefixed "slog:" if any.
+    validations:
+      required: true
