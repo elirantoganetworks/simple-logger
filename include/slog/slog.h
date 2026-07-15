@@ -24,9 +24,9 @@
 
 // ---- version ----------------------------------------------------------
 #define SLOG_VERSION_MAJOR 1
-#define SLOG_VERSION_MINOR 0
+#define SLOG_VERSION_MINOR 1
 #define SLOG_VERSION_PATCH 0
-#define SLOG_VERSION_STRING "1.0.0"
+#define SLOG_VERSION_STRING "1.1.0"
 
 // ---- compile-time level ceiling ---------------------------------------
 // These integer values fix the level order: a smaller number is a lower
@@ -310,7 +310,7 @@ SLOG_API void restart_after_fork() noexcept;
 SLOG_API void load_file(const char* path);
 SLOG_API void load_env();
 
-// Library version string, e.g. "1.0.0".
+// Library version string, e.g. "1.1.0".
 SLOG_API const char* version() noexcept;
 
 }  // namespace slog
