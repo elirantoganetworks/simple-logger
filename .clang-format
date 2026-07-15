@@ -1,0 +1,14 @@
+# Code style for slog. One style, used everywhere.
+Language: Cpp
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 90
+PointerAlignment: Left
+DerivePointerAlignment: false
+AlignConsecutiveDeclarations: true
+AlignConsecutiveAssignments: true
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: false
+AlignEscapedNewlines: Right
+IncludeBlocks: Preserve
+SortIncludes: CaseSensitive

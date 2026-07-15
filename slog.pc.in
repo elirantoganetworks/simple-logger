@@ -1,0 +1,10 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: slog
+Description: A small, fast logging library for Linux
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lslog -pthread
+Cflags: -I${includedir}
