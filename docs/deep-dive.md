@@ -415,19 +415,111 @@ level, or raise the flush level, or rate-limit the call.
 
 ## Error handling
 
-A log call never throws and never crashes your program. When something goes wrong,
-slog prints one line to stderr, prefixed `slog:`, and keeps going.
+Every failure reaches you with a meaningful code. Nothing fails in silence, and a
+log call never crashes your program.
 
-- **The log dir cannot be created** (no permission, read-only filesystem, a file
-  in the way): slog turns file output off for the run and keeps stdout working.
-- **A write fails** (disk full, I/O error): slog drops that line, counts it, and
-  prints a one-time note so the failure is visible without flooding stderr. If the
-  disk fills mid-write, the last line already on disk can be short, since an
-  append cannot be undone; every earlier line stays whole.
-- **A config value is bad** (an unknown level, a bad boolean, an unknown key):
-  slog prints a note, skips that setting, and keeps the default.
-- **A message is longer than the line limit:** slog truncates it with a `...`
-  marker so the line stays whole and atomic.
+### Two phases
+
+slog splits its life into two phases, and the error rule follows the split.
+
+- **Setup** (config and `init()`) runs on your stack, where you can handle a
+  problem before any logging starts. So `init()` **throws** on a hard setup
+  failure: the log directory cannot be made, the run lock cannot be taken, or the
+  run directory cannot be opened. Wrap `init()` in a `try` if you want to react
+  (fall back to another directory, exit with a message). If you never call
+  `init()`, the first log opens the run lazily and still never throws; the same
+  failure is recorded instead and file output falls back to stdout only.
+
+- **Steady-state logging** is called from anywhere: destructors, `catch` blocks,
+  signal-adjacent code, other libraries. So a log call is `noexcept` and **never
+  throws**. A runtime failure is recorded and reaches you three ways at once:
+
+  1. a sticky `last_error()` you can read at any time, set for every failure,
+  2. an optional `error_handler` you install, called once for each failure that
+     drops a line or fails setup,
+  3. a `dropped()` counter of lines lost to a failed write or allocation.
+
+  A one-line note also goes to stderr, prefixed `slog:`, once per code, so a
+  repeated failure (a full disk) does not flood stderr. A failure that keeps the
+  line, a cut-to-fit message, or a bad config value that keeps the default, still
+  sets `last_error()` and the stderr note, but does not call the handler.
+
+### Reading errors
+
+```cpp
+#include <slog/slog.h>
+#include <cstdio>
+
+// Phase one: react to a hard setup failure.
+try {
+    slog::set_log_dir("/var/log/myapp");
+    slog::init();
+} catch (const slog::error& e) {
+    std::fprintf(stderr, "logging setup failed: %s (code %d)\n",
+                 e.what(), e.code().value());
+    // fall back, or carry on with stdout only
+}
+
+// Phase two: watch runtime failures without throwing.
+slog::set_error_handler([](const slog::error_info& info, void*) {
+    std::fprintf(stderr, "slog dropped a line: %s (errno %d, %s)\n",
+                 info.message, info.sys_errno, info.detail);
+}, nullptr);
+
+LOG_WARNING("disk almost full");
+
+// Or poll instead of installing a handler.
+if (slog::last_error().code != slog::errc::ok)
+    std::fprintf(stderr, "last slog problem: %s\n", slog::last_error().message);
+std::fprintf(stderr, "%llu lines dropped so far\n",
+             (unsigned long long)slog::dropped());
+```
+
+`error_info` owns no heap: `message` points at a static string for the code and
+`detail` is a fixed buffer, so copying it (and reporting it) allocates nothing,
+even when the failure itself is out of memory. A handler must not throw, must
+return promptly, and must not log through slog. An exception from it is swallowed;
+a nested log from it is dropped by a recursion guard, so it can never loop.
+
+### Error codes
+
+Every failure site has a code. The numbers are grouped by area and are frozen
+once released: a value never changes and is never reused. `0` is success.
+
+| Code | Name | When it fires | What the library does | What you can do |
+|-----:|------|---------------|-----------------------|-----------------|
+| 0  | `ok` | no failure | - | - |
+| 10 | `config_file_read` | a config file you loaded cannot be opened | keeps every default | check the path and its permissions |
+| 11 | `config_bad_value` | a config value does not parse | keeps that setting's default | fix the value (the detail names it) |
+| 12 | `config_unknown_key` | a config key is not recognized | skips that line | fix or remove the key |
+| 20 | `dir_create` | the log directory cannot be created | `init()` throws; a lazy log records it and uses stdout only | pick a writable dir, or check the filesystem |
+| 21 | `run_lock` | the run lock file cannot be created or opened | `init()` throws; a lazy log records it | check dir permissions and free space |
+| 22 | `run_dir_open` | the run directory cannot be opened | `init()` throws; a lazy log records it | check the log dir is a real directory |
+| 30 | `file_open` | a log file cannot be opened | records it, keeps other outputs working | check the name, the path length, and free space |
+| 31 | `file_write` | a write to a log file fails | drops that line, counts it, keeps going | free disk space or check the device |
+| 40 | `stdout_write` | a write to stdout fails (a closed pipe) | drops that line, counts it, keeps going | expected under `app \| head`; otherwise check the pipe |
+| 50 | `out_of_memory` | an allocation on the log path fails | drops that line, counts it, keeps going | reduce memory pressure |
+| 51 | `message_truncated` | a message is longer than the line limit | cuts it with a `...` marker; the line is still written | shorten the message, or accept the cut |
+
+The per-run lock (code `21` when it is fatal) is best effort in one spot: if the
+lock file for *this* run cannot be created, the run still logs and only retention
+loses sight of it, so that case is recorded but not fatal.
+
+### Building without exceptions
+
+slog compiles and runs in a translation unit built with `-fno-exceptions`. The one
+`throw` (in `init()`) is compiled out; a hard setup failure is then recorded like
+any other failure, so check `last_error()` after `init()` in that build. The log
+path is `noexcept` either way, so nothing else changes.
+
+### Migrating from 1.0.0
+
+The error API is additive. Code written for 1.0.0 keeps compiling and behaving,
+with one thing to know: `init()` now throws `slog::error` (a `std::system_error`)
+on a hard setup failure, where 1.0.0 only printed a note and carried on. If you
+call `init()` and do not want the throw, wrap it in a `try`, or skip `init()` and
+let the first log open the run lazily (that path never throws). Everything else -
+the log macros, the config API, the output - is unchanged.
 
 ## Rate limits
 
@@ -574,7 +666,35 @@ void flush();                  // flush all outputs now; safe while other thread
 void shutdown();               // flush and close; call only when no thread is logging
 void install_crash_handler();  // best-effort flush on a fatal signal
 void restart_after_fork();     // open fresh PID-named files in a forked child
-const char* version();         // "1.0.0"
+const char* version();         // "1.1.0"
+```
+
+### Errors
+
+```cpp
+enum class errc { ok = 0, /* ... see the error code table above ... */ };
+
+// The one exception type. init() throws this on a hard setup failure. It is a
+// std::system_error, so it carries .code() and .what().
+class error : public std::system_error { ... };
+
+// The detail of one failure. Owns no heap, so copying it never allocates.
+struct error_info {
+    errc        code;         // the failure code, errc::ok if none
+    int         sys_errno;    // errno at the failure, or 0
+    const char* message;      // a short, static message for the code
+    char        detail[200];  // the path, key, or module involved (may be cut)
+};
+
+using error_handler = void (*)(const error_info& info, void* user);
+
+void        set_error_handler(error_handler handler, void* user);  // nullptr clears
+error_info  last_error();      // the last failure, or code == errc::ok
+void        clear_error();     // reset last_error() to ok
+std::uint64_t dropped();       // lines lost to a failed write or allocation
+
+const std::error_category& error_category();     // the "slog" category
+std::error_code            make_error_code(errc); // an errc as a std::error_code
 ```
 
 ## Testing code that logs

@@ -119,6 +119,8 @@ body:
     id: actual
     attributes:
       label: What happened
-      description: The output you saw. Include the stderr lines prefixed "slog:" if any.
+      description: >
+        The output you saw. Include the stderr lines prefixed "slog:" if any, and
+        the error code from slog::last_error() if you have it (see the deep dive).
     validations:
       required: true
