@@ -30,6 +30,7 @@ slog_add_test(test_rate_limit test_rate_limit.cpp)
 slog_add_test(test_lifecycle test_lifecycle.cpp)
 slog_add_test(test_concurrency test_concurrency.cpp)
 slog_add_test(test_perf test_perf.cpp)
+slog_add_test(test_audit_fixes test_audit_fixes.cpp)
 slog_add_test(test_headers
   test_headers.cpp hdr_slog_alone.cpp hdr_testing_alone.cpp hdr_no_short.cpp
   strip_check.cpp)
@@ -39,6 +40,12 @@ slog_add_test(test_multiproc test_multiproc.cpp)
 target_compile_definitions(test_multiproc PRIVATE
   SLOG_HELPER="$<TARGET_FILE:slog_helper>")
 add_dependencies(test_multiproc slog_helper)
+
+# Retention drives the helper too (one dead run per call).
+slog_add_test(test_retention test_retention.cpp)
+target_compile_definitions(test_retention PRIVATE
+  SLOG_HELPER="$<TARGET_FILE:slog_helper>")
+add_dependencies(test_retention slog_helper)
 
 # The three consumption paths, driven by a script. Labeled so a sanitizer run can
 # skip it (it builds its own copies of the library without sanitizers).
