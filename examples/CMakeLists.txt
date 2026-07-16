@@ -15,7 +15,8 @@ set(SLOG_EXAMPLES
   custom_levels
   custom_prefix
   multithread
-  multiprocess)
+  multiprocess
+  error_handling)
 
 foreach(ex ${SLOG_EXAMPLES})
   add_executable(${ex} ${ex}.cpp)

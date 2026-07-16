@@ -15,16 +15,18 @@
 
 #include <atomic>
 #include <cstdarg>
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string>
+#include <system_error>
 #include <vector>
 
 // ---- version ----------------------------------------------------------
 #define SLOG_VERSION_MAJOR 1
-#define SLOG_VERSION_MINOR 0
+#define SLOG_VERSION_MINOR 1
 #define SLOG_VERSION_PATCH 0
-#define SLOG_VERSION_STRING "1.0.0"
+#define SLOG_VERSION_STRING "1.1.0"
 
 // ---- compile-time level ceiling ---------------------------------------
 // These integer values fix the level order: a smaller number is a lower
@@ -111,26 +113,107 @@ struct CallSite {
 
 // Hot-path filter check. Cheap: a global disable load, then (once resolved) one
 // atomic load of the module collect level and one integer compare. Returns
-// true when the record could reach at least one output.
-SLOG_API bool should_log(CallSite& cs, const Level& level);
+// true when the record could reach at least one output. noexcept: a log call is
+// called from anywhere (destructors, catch blocks), so it never throws. A rare
+// internal failure (an allocation on first use of a module) is caught, recorded,
+// and the call returns false.
+SLOG_API bool should_log(CallSite& cs, const Level& level) noexcept;
 
 // Emit a record. Called by the macros only after should_log returned true. The
-// printf format attribute lets GCC and Clang check the format string.
-SLOG_API void emit(CallSite& cs, const Level& level, SourceLoc loc, const char* fmt, ...)
+// printf format attribute lets GCC and Clang check the format string. noexcept:
+// a runtime failure is recorded (see the error API below), never thrown.
+SLOG_API void emit(CallSite& cs, const Level& level, SourceLoc loc, const char* fmt, ...) noexcept
     __attribute__((format(printf, 4, 5)));
 
 // Emit for a module named at the call site (used by LOG_TO). Resolves the module
 // each call, so the module value may vary.
 SLOG_API void emit_to(const char* module, const Level& level, SourceLoc loc, const char* fmt,
-                      ...) __attribute__((format(printf, 4, 5)));
+                      ...) noexcept __attribute__((format(printf, 4, 5)));
 
 // Cheap guard for building expensive log arguments by hand:
 //   if (slog::is_enabled("net", slog::DEBUG)) { ... }
-SLOG_API bool is_enabled(const char* module, const Level& level);
+SLOG_API bool is_enabled(const char* module, const Level& level) noexcept;
 
 // Monotonic clock in nanoseconds, used by the rate-limit macros. Declared here
 // so the header does not need to include <chrono>.
-SLOG_API std::int64_t mono_nanos();
+SLOG_API std::int64_t mono_nanos() noexcept;
+
+// ---- errors -----------------------------------------------------------
+// slog has two phases. Config and init run on the user's stack, so init() throws
+// on a hard setup failure (see below). Steady-state logging is called from
+// anywhere and never throws; a runtime failure is recorded and reaches the user
+// three ways: a sticky last_error(), an optional handler, and a dropped() count.
+// A one-line note also goes to stderr as a last resort.
+
+// Every failure the library can report. The numbers are grouped by area and are
+// frozen once released: a value never changes and is never reused. 0 is success.
+enum class errc {
+    ok = 0,
+
+    // Config (10-19): a value or the config file was bad. The default is kept.
+    config_file_read  = 10,  // the config file could not be read
+    config_bad_value  = 11,  // a config value did not parse; kept the default
+    config_unknown_key = 12,  // an unknown config key was seen and skipped
+
+    // Run directory setup (20-29). init() throws these; a lazy first log records
+    // them and falls back to stdout only.
+    dir_create   = 20,  // could not create the log directory
+    run_lock     = 21,  // could not create or lock the run lock file
+    run_dir_open = 22,  // could not open the run directory
+
+    // File output (30-39). Recorded on the log path, never thrown.
+    file_open  = 30,  // could not open a log file
+    file_write = 31,  // a write to a log file failed; the line was dropped
+
+    // Stdout output (40-49).
+    stdout_write = 40,  // a write to stdout failed; the line was dropped
+
+    // Internal (50-59).
+    out_of_memory     = 50,  // an allocation failed; the line was dropped
+    message_truncated = 51,  // a message was too long and was cut to fit
+};
+
+// The error category, so an errc becomes a std::error_code with a message.
+SLOG_API const std::error_category& error_category() noexcept;
+SLOG_API std::error_code            make_error_code(errc e) noexcept;
+
+// The one exception type. init() throws this on a hard setup failure. It is a
+// std::system_error, so it carries the code (.code()) and a message (.what()).
+// Catch this one type to catch every slog setup failure.
+class SLOG_API error : public std::system_error {
+   public:
+    error(errc e, const std::string& what) : std::system_error(make_error_code(e), what) {}
+};
+
+// The detail of one failure, passed to the handler and returned by last_error().
+// It holds no owning strings, so copying it never allocates: message points at a
+// static string for the code, and detail is a fixed buffer, cut if it is long.
+struct error_info {
+    errc        code      = errc::ok;
+    int         sys_errno = 0;   // errno at the failure, or 0 if none
+    const char* message   = "";  // a short, static message for the code
+    char        detail[200] = {};  // the path, key, or module involved (may be cut)
+};
+
+// A handler the user registers, called once per failure with the failure detail
+// and the user pointer given to set_error_handler. It must not throw, must
+// return promptly, and must not log through slog (a recursion guard drops a
+// nested call). An exception from it is swallowed in a build with exceptions.
+using error_handler = void (*)(const error_info& info, void* user);
+
+// Install (or clear, with nullptr) the error handler and its user pointer.
+SLOG_API void set_error_handler(error_handler handler, void* user) noexcept;
+
+// The last failure recorded, or code == errc::ok if none. Thread safe: it
+// returns a copy taken under a lock.
+SLOG_API error_info last_error() noexcept;
+
+// Clear the sticky last error back to ok.
+SLOG_API void clear_error() noexcept;
+
+// The number of log lines dropped by a failed write or a failed allocation since
+// the process started. Never resets on its own.
+SLOG_API std::uint64_t dropped() noexcept;
 
 // ---- configuration ----------------------------------------------------
 
@@ -202,28 +285,41 @@ SLOG_API void enable_elapsed(bool on);
 SLOG_API void set_flush_level(const Level& level);
 
 // Lifecycle.
-SLOG_API void init();   // open files now (optional; done on first log)
-SLOG_API void flush();  // flush all sinks now; safe to call while other threads log
+// Open the run now, instead of on the first log. This is the setup phase, so it
+// throws slog::error on a hard failure (the log directory cannot be made, the
+// run lock cannot be taken, the run directory cannot be opened). A build without
+// exceptions records the failure instead (see the error API). If you never call
+// init(), the first log opens the run lazily and never throws: a failure there
+// falls back to stdout only and is recorded.
+SLOG_API void init();
+
+SLOG_API void flush() noexcept;  // flush all sinks now; safe while other threads log
 
 // Flush and close the sinks. Call it only when no other thread is logging (it
 // closes the file descriptors). It is not required: the tail is flushed
 // automatically at exit, and the OS closes the files then.
-SLOG_API void shutdown();
+SLOG_API void shutdown() noexcept;
 
-SLOG_API void install_crash_handler();  // best-effort flush on a fatal signal
+SLOG_API void install_crash_handler() noexcept;  // best-effort flush on a fatal signal
 
 // Open fresh, PID-named files for a forked child. Call it from the child before
 // it logs, and only from the child's single (post-fork) thread.
-SLOG_API void restart_after_fork();
+SLOG_API void restart_after_fork() noexcept;
 
 // Explicit config loads. Normally the first use does file then env for you.
 SLOG_API void load_file(const char* path);
 SLOG_API void load_env();
 
-// Library version string, e.g. "1.0.0".
-SLOG_API const char* version();
+// Library version string, e.g. "1.1.0".
+SLOG_API const char* version() noexcept;
 
 }  // namespace slog
+
+// Let a slog::errc build a std::error_code directly.
+namespace std {
+template <>
+struct is_error_code_enum<::slog::errc> : true_type {};
+}  // namespace std
 
 // ---- log macros -------------------------------------------------------
 // SLOG_EMIT is the shared body for a fixed-module call site. It caches the call

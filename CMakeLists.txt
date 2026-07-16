@@ -6,7 +6,7 @@
 #   - prebuilt shared lib:  install this, then link -lslog (or find_package)
 
 cmake_minimum_required(VERSION 3.14)
-project(slog VERSION 1.0.0 LANGUAGES CXX)
+project(slog VERSION 1.1.0 LANGUAGES CXX)
 
 # Only impose our strict warnings and tests when slog is the top-level project.
 # A consumer that adds us as a subdirectory never inherits -Werror.
@@ -24,7 +24,8 @@ add_library(slog
   src/level.cpp
   src/format.cpp
   src/sink.cpp
-  src/run_dir.cpp)
+  src/run_dir.cpp
+  src/error.cpp)
 add_library(slog::slog ALIAS slog)
 
 target_include_directories(slog

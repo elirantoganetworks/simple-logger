@@ -89,7 +89,7 @@ jobs:
           work="$(mktemp -d)"
           cd "$work"
           for ex in quickstart modules stdout_control files tags custom_levels \
-                    custom_prefix multithread multiprocess config_demo; do
+                    custom_prefix multithread multiprocess error_handling config_demo; do
             "$GITHUB_WORKSPACE/build/examples/$ex" >/dev/null
             rm -rf logs
           done

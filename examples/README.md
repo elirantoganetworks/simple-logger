@@ -38,6 +38,7 @@ wrote.
 | [custom_prefix.cpp](custom_prefix.cpp) | change the line prefix and add the time field |
 | [multithread.cpp](multithread.cpp) | four threads into one file, no torn lines |
 | [multiprocess.cpp](multiprocess.cpp) | fork workers, each with its own file |
+| [error_handling.cpp](error_handling.cpp) | catch a setup error, watch runtime failures with a handler |
 
 ## Config
 

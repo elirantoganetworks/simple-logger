@@ -17,11 +17,11 @@ void       emit_debug();
 void       emit_warning();
 }  // namespace stripcheck
 
-TEST_CASE("version macro and function agree and read 1.0.0") {
-    CHECK(std::strcmp(slog::version(), "1.0.0") == 0);
-    CHECK(std::strcmp(SLOG_VERSION_STRING, "1.0.0") == 0);
+TEST_CASE("version macro and function agree and read 1.1.0") {
+    CHECK(std::strcmp(slog::version(), "1.1.0") == 0);
+    CHECK(std::strcmp(SLOG_VERSION_STRING, "1.1.0") == 0);
     CHECK(SLOG_VERSION_MAJOR == 1);
-    CHECK(SLOG_VERSION_MINOR == 0);
+    CHECK(SLOG_VERSION_MINOR == 1);
     CHECK(SLOG_VERSION_PATCH == 0);
 }
 
