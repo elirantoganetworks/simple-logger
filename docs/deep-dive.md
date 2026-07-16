@@ -239,6 +239,10 @@ logs/nightly/nightly-111-20260715-101500.log
 logs/latest/nightly/nightly-222-20260715-101507.log
 ```
 
+A tag is sanitized before it becomes a path. Any character that is not a letter,
+a digit, `.`, `-`, or `_` becomes `_`, and an all-dots tag becomes underscores,
+so a tag can never add a path level or escape the log dir.
+
 ### A tag whose target already exists
 
 If `logs/nightly` is already taken when a run moves out, the move uses a running
@@ -259,6 +263,10 @@ both create `latest/<tag>`. Whichever run takes the lock last ends up as the
 newest under `latest`; the rest are moved out at once. No line is lost, because
 moving a file with `rename` does not disturb a descriptor that is already open, so
 a moved-out run keeps writing to its file at its new path.
+
+The log dir also holds two hidden bookkeeping files: `.slog.lock`, the structure
+lock above, and one `.slog-run-<pid>-<timestamp>.lock` per run, held for the whole
+run so retention can tell a live run from a finished one. Leave them alone.
 
 ### Retention
 
@@ -331,11 +339,11 @@ arguments at compile time. One gotcha: a `std::string` argument needs `.c_str()`
 
 slog is safe to use from many threads and many processes at once.
 
-**Threads.** The check that decides whether to log is lock-free. A line is
-written with one `write` call, which is atomic, so lines from different threads
-never tear or interleave. A lock guards only the rare things: a config change,
-opening a file, and the startup retention sweep. None of that is on the path of a
-normal log call.
+**Threads.** The check that decides whether to log at a fixed-module call site is
+lock-free. A line is written with one `write` call, which is atomic, so lines
+from different threads never tear or interleave. A lock guards only the rare
+things: a config change, opening a file, and the startup retention sweep. None of
+that is on the path of a normal log call.
 
 **Processes.** Each process gets its own PID-named file, so processes do not share
 a file unless you give them the same fixed file name. Writes use one `write` call
@@ -371,12 +379,11 @@ program peppered with `DEBUG` calls should cost almost nothing in production.
 
 **A filtered-out call** reads a global "disabled" flag and, once the call site has
 resolved its module the first time, one atomic level value, then compares. That is
-a couple of atomic loads and an integer compare, on the order of ten to twenty
-nanoseconds, with no lock, no allocation, no syscall, and the message arguments
-are never evaluated.
+a few atomic loads and an integer compare, on the order of a few nanoseconds, with
+no lock, no allocation, no syscall, and the message arguments are never evaluated.
 
 **A live call** formats the message into a thread-local buffer with `vsnprintf`,
-builds the prefix, and issues one `write`.
+builds the prefix, and issues one `write` per enabled output.
 
 Two ways to make disabled logging cost even less:
 
@@ -396,6 +403,11 @@ Two ways to make disabled logging cost even less:
   if (slog::is_enabled("net", slog::DEBUG))
       LOG_TO("net", slog::DEBUG, "state: %s", dump_expensive_state().c_str());
   ```
+
+  `is_enabled` and `LOG_TO` take a runtime module name, so they look up the module
+  under a short lock on each call, unlike the fixed-module `LOG_*` macros, whose
+  check is lock-free. The guard still pays off when the argument is costly; for a
+  hot loop on a fixed module, a `LOG_MODULE` call site avoids the lock.
 
 What to avoid: logging at a level that triggers a flush (`WARNING` and above, by
 default) inside a hot loop, since each such line calls `fdatasync`. Use a lower
@@ -483,6 +495,11 @@ Macro knobs, defined before the include:
   `SLOG_*` names (`SLOG_ERROR`, `SLOG_INFO`, and so on). Use this if another
   library already defines `LOG_*` (for example glog).
 
+The macros expand to a few exported helpers you do not call directly: `emit`,
+`emit_to`, and `should_log`, with the `CallSite` and `SourceLoc` types they pass.
+One more, `mono_nanos()`, returns the monotonic clock in nanoseconds and is what
+`LOG_EVERY_N_SEC` reads.
+
 ### Levels
 
 ```cpp
@@ -566,7 +583,9 @@ const char* version();         // "1.0.0"
 to make time deterministic. It is opt-in and does not touch a normal build.
 
 ```cpp
+#include <slog/slog.h>
 #include <slog/testing.h>
+#include <cassert>
 
 slog::testing::reset();                          // pristine state for this test
 auto& cap = slog::testing::capture_to_memory();  // send file output to memory
@@ -580,7 +599,9 @@ assert(cap.lines()[0].find("hello 1") != std::string::npos);
 
 Other hooks: `stop_capture()`, `set_clock(fn)` / `reset_clock()` for the `%t` and
 `%e` fields, `set_mono_clock(fn)` / `reset_mono_clock()` for `LOG_EVERY_N_SEC`,
-and `set_start_epoch_nanos(n)` to fix the zero point of `%e`.
+and `set_start_epoch_nanos(n)` to fix the zero point of `%e`. Three counters read
+work that has no visible output: `format_spec_count()`, `flush_count()`, and
+`drop_count()`.
 
 ## Troubleshooting
 

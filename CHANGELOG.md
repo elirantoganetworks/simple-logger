@@ -36,5 +36,7 @@ POSIX.
 - A compile-time level ceiling, `SLOG_ACTIVE_LEVEL`, to strip verbose calls from
   a build.
 - An optional crash handler that flushes on a fatal signal.
+- An opt-in test header, `<slog/testing.h>`: in-memory log capture, deterministic
+  clocks, and counters, so your own tests can check what you logged.
 - Three ways to consume the library: copied sources, a `third_party`
   subdirectory with CMake, or a prebuilt shared library.
