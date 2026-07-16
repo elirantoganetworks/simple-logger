@@ -50,7 +50,7 @@ TEST_CASE("many threads to one file: no lost, no torn, no interleaved lines") {
     const int                kEach    = 1000;
     std::vector<std::thread> ts;
     for (int t = 0; t < kThreads; ++t) {
-        ts.emplace_back([kEach] {
+        ts.emplace_back([] {
             for (int i = 0; i < kEach; ++i) LOG_INFO("i=%d", i);
         });
     }
@@ -87,7 +87,7 @@ TEST_CASE("a config change while threads log does not crash or tear lines") {
     const int                kEach    = 1000;
     std::vector<std::thread> ts;
     for (int t = 0; t < kThreads; ++t)
-        ts.emplace_back([kEach] {
+        ts.emplace_back([] {
             for (int i = 0; i < kEach; ++i) LOG_INFO("i=%d", i);
         });
     for (auto& th : ts) th.join();
